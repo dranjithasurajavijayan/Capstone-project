@@ -1,0 +1,362 @@
+---
+title: "Clinical Parameters of TB Patients: Data Cleaning and Analysis"
+author: "Anjitha"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: false
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+
+
+## Background
+
+Tuberculosis (TB) remains an important public health concern and can present with varying degrees of clinical severity. While some patients may have relatively stable clinical conditions, others may present with symptoms and clinical abnormalities that require urgent medical attention, referral, or hospital admission. Timely recognition of these patients is essential for appropriate clinical management.
+
+Risk assessment is an important component of patient care because it informs decisions regarding further evaluation, treatment, referral, and admission. Medical officers assess patients using their clinical presentation, symptoms, examination findings, and available investigations. However, there is a possibility that important warning signs or abnormal clinical parameters may not always be adequately reflected in the assigned risk category.
+
+A systematic, algorithm-based approach may help standardise risk assessment by applying predefined criteria to the clinical information available for each patient. Such an approach could potentially support healthcare providers in identifying patients who require closer monitoring or more intensive care. However, the usefulness of an algorithm depends on the validity of its criteria and its ability to identify patients at increased clinical risk.
+
+The present analysis examines the clinical parameters recorded among TB patients and compares medical officers' risk classifications with a rule-based classification determined by the number of abnormal clinical parameters. According to the criteria specified for this project, patients with one abnormal parameter are classified as low risk, those with two to three abnormal parameters as moderate risk, and those with four or more abnormal parameters as high risk. Patients with no abnormal parameters are considered separately because they are not explicitly classified by these criteria.
+
+
+This analysis aims to explore the extent of agreement between medical officers' assessments and the proposed parameter-count classification. The findings may provide insights into whether a systematic approach could support clinical risk assessment and help identify patients who may require further evaluation. However, differences between the two classifications will not, by themselves, establish the superiority of the algorithm or demonstrate that it improves admission decisions. Such conclusions would require validation against an appropriate clinical reference standard and, ideally, patient outcomes.
+
+
+
+```{r}
+#| include: false
+# install.packages(c("readxl", "dplyr", "tidyr", "ggplot2",
+#                    "janitor", "lubridate", "knitr"))
+
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(janitor)
+library(tibble)
+library(lubridate)
+library(knitr)
+
+
+data <- read_excel("clinical parameters_TBpatients.xlsx",
+                  sheet = "Uttar Pradesh _Tuberculosis")
+
+dim(data)
+names(data)
+glimpse(data)
+```
+
+## 1,2 Creating a unique id from row-based ID, clean column names, and move assessment date to the front
+
+
+
+```{r}
+#| echo: false
+
+tb <- data|>
+  rownames_to_column(var = "row_id") |>
+  mutate(
+    row_id = as.integer(row_id),
+    unique_id = paste0("TB_", row_id)
+  ) |>
+  clean_names()
+
+# Rename date_of_assessment to start and place it first
+tb <- tb |>
+  rename(start = date_of_assessment) |>
+  relocate(start, unique_id, row_id)
+
+# Display only the first 10 unique IDs
+tb |>
+  select(unique_id) |>
+  head(10) |>
+  kable()
+```
+
+## 3. Calculating mean delay in assessment and mean age. Replacing any missing value with mean.
+
+
+
+```{r}
+#| include: false
+tb <- tb |> 
+  mutate(
+    delay_days = as.numeric(end - start,units = "days"))
+
+mean_delay <- mean(tb$delay_days, na.rm = TRUE)
+mean_age <- mean(tb$age, na.rm = TRUE)
+mean_delay
+mean_age
+
+tb$delay_days[is.na(tb$delay_days)] <- mean_delay
+
+tb$age[is.na(tb$age)] <- mean_age
+```
+
+The mean delay in assessment is `r round (mean_delay,2)` days and the mean age is `r round (mean_age,2)` years.
+
+## 4. Percentage of patients who had cough
+
+
+
+```{r}
+cough_summary <- tb |>
+  summarise(
+    total_with_recorded_cough_status = sum(!is.na(current_symptoms_cough)),
+    cough_yes = sum(current_symptoms_cough == 1, na.rm = TRUE),
+    cough_percent = 100 * mean(current_symptoms_cough == 1, na.rm = TRUE)
+  )
+
+cough_summary |> kable(digits = 2)
+cough_percent <- cough_summary$cough_percent
+```
+
+The percentage of patients who had cough are `r round(cough_percent, 2)`%.
+
+## 5. Stacked column chart: number of patients by district and gender
+
+```{r}
+tb |>
+  filter(!is.na(district), !is.na(gender)) |>
+  count(district, gender, name = "patients") |>
+  ggplot(aes(x = reorder(district, patients, FUN = sum),
+             y = patients, fill = gender)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Number of assessed patients by district and gender",
+    x = "District", y = "Number of patients", fill = "Gender"
+  ) +
+  theme_minimal()
+```
+
+## 6. Does age follow a normal distribution?
+
+
+
+```{r}
+ggplot(tb, aes(x = age)) +
+  geom_histogram(bins = 20, na.rm = TRUE) +
+  labs(title = "Distribution of age", x = "Age (years)", y = "Number of patients") +
+  theme_minimal()
+
+ggplot(tb, aes(sample = age)) +
+  stat_qq(na.rm = TRUE) +
+  stat_qq_line(na.rm = TRUE) +
+  labs(title = "Normal Q-Q plot for age") +
+  theme_minimal()
+
+shapiro.test(tb$age)
+```
+
+Age does not follow a normal distribution. The histogram is asymmetric and right-skewed, peaking at about 18-22 years with a long tail towards 80 and secondary bumps around 40-45 and 55-60. The Q-Q plot shows a systematic S-shaped deviation from the reference line, with the youngest and oldest patients departing from what a normal distribution would predict. The Shapiro-Wilk test confirms this (W = 0.946, p = 4.5 × 10⁻¹⁴), so we reject the null hypothesis of normality; W is close to 1, so the departure is moderate, but the test is very sensitive in a large sample.
+
+## 7. Stratify patients by number of abnormal parameters
+
+The cut-offs are: 1 = low risk, 2–3 = moderate risk, and 4 or more = high risk. Those with zero abnormal parameters are assigned to the category 'No abnormal parameters'
+
+```{r}
+tb <- tb |>
+  mutate(
+    algorithm_risk = case_when(
+      no_of_abnormal_parameters == 0 ~ "No abnormal parameters",
+      no_of_abnormal_parameters == 1 ~ "Low risk",
+      no_of_abnormal_parameters %in% 2:3 ~ "Moderate risk",
+      no_of_abnormal_parameters >= 4 ~ "High risk",
+      TRUE ~ NA_character_
+    ),
+    algorithm_risk = factor(
+      algorithm_risk,
+      levels = c("No abnormal parameters", "Low risk",
+                 "Moderate risk", "High risk")
+    )
+  )
+
+tb |>
+  count(algorithm_risk, name = "patients") |>
+  mutate(percent = 100 * patients / sum(patients)) |>
+  kable(digits = 1, caption = "Patient counts by parameter-count risk category")
+```
+
+
+## 8. Cross-tabulate medical officer risk against parameter-count risk
+
+```{r}
+
+# Create medical officer risk classification
+tb <- tb |>
+  mutate(
+    mo_risk_clean = trimws(
+      final_risk_stratification_by_the_medical_officer
+    ),
+    mo_risk = case_when(
+      grepl("^low risk", mo_risk_clean, ignore.case = TRUE) ~ "Low risk",
+      grepl("^moderate risk", mo_risk_clean, ignore.case = TRUE) ~ "Moderate risk",
+      grepl("^high risk", mo_risk_clean, ignore.case = TRUE) ~ "High risk",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# Summarise missing medical officer classifications
+missing_summary <- tb |>
+  summarise(
+    total_patients = n(),
+    missing_mo_risk = sum(is.na(mo_risk)),
+    percentage_missing = mean(is.na(mo_risk)) * 100
+  )
+
+knitr::kable(
+  missing_summary,
+  digits = 2,
+  caption = "Missing Medical Officer Risk Classifications"
+)
+
+# Cross-tabulation of medical officer risk and parameter-count risk
+# Exclude patients with missing medical officer classifications
+risk_table <- tb |>
+  filter(!is.na(mo_risk)) |>
+  count(mo_risk, algorithm_risk) |>
+  tidyr::pivot_wider(
+    names_from = algorithm_risk,
+    values_from = n,
+    values_fill = 0
+  )
+
+knitr::kable(
+  risk_table,
+  caption = "Cross-tabulation of Medical Officer Risk and Parameter-Count Risk"
+)
+
+
+# Identify patients classified as low risk by the medical officer
+# but high risk according to the parameter-count rule
+low_mo_high_algorithm <- tb |>
+  filter(
+    !is.na(mo_risk),
+    mo_risk == "Low risk",
+    algorithm_risk == "High risk"
+  )
+
+
+
+```
+The number of persons stratified by medical officer as being in low-risk despite the number of abnormal parameters being in high risk are `r nrow(low_mo_high_algorithm)`
+
+## 9. Descending chart for selected abnormal parameters
+
+
+
+```{r}
+selected_parameters <- c(
+  "respiratory_rate", "bmi", "haemoglobin", "oxygen_saturation"
+)
+
+parameter_counts <- tb |>
+  summarise(across(all_of(selected_parameters),
+                   ~ sum(.x == 1, na.rm = TRUE))) |>
+  pivot_longer(
+    cols = everything(),
+    names_to = "parameter",
+    values_to = "patients_abnormal"
+  ) |>
+  mutate(parameter = recode(
+    parameter,
+    respiratory_rate = "Respiratory rate",
+    bmi = "BMI",
+    haemoglobin = "Haemoglobin",
+    oxygen_saturation = "Oxygen saturation"
+  )) |>
+  arrange(desc(patients_abnormal))
+
+parameter_counts |> kable()
+
+ggplot(parameter_counts,
+       aes(x = reorder(parameter, patients_abnormal),
+           y = patients_abnormal)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Patients with selected abnormal parameters",
+    x = "Parameter", y = "Number of patients"
+  ) +
+  theme_minimal()
+```
+
+## 10. Subset: male patients without blood in sputum
+
+```{r}
+male_no_blood_sputum <- tb |>
+  filter(gender == "Male", blood_in_sputum == 0)
+
+
+
+male_no_blood_sputum |>
+  select(unique_id, start, district, age, gender, blood_in_sputum) |>
+  head(20) |>
+  kable()
+```
+ 
+## 11. Additional findings 
+
+### Missing data
+
+```{r}
+missing_summary <- tb |>
+  summarise(across(everything(), ~ sum(is.na(.x)))) |>
+  pivot_longer(everything(),
+               names_to = "variable",
+               values_to = "missing_count") |>
+  mutate(missing_percent = 100 * missing_count / nrow(tb)) |>
+  filter(
+    missing_count > 0,
+    !variable %in% c("episode_id", "patient_name",
+                     "final_risk_stratification_by_the_medical_officer",
+                     "mo_risk_clean")
+  )  |>
+  arrange(desc(missing_count))
+
+missing_summary |>
+  head(15) |>
+  kable(
+    digits = 1,
+    col.names = c("Variable", "Missing (n)", "Missing (%)"))
+```
+
+### Danger signs overlooked
+
+An acute danger sign is defined here as a drowsy, unconscious or comatose patient or abnormal oxygen saturation. Patients with a danger sign are compared with the medical officer's risk classification and the admission recommendation.
+
+```{r}
+danger_signs <- tb |>
+  filter(!is.na(mo_risk)) |>
+  mutate(
+    danger_sign = general_condition == 1 | oxygen_saturation == 1,
+    mo_risk = factor(mo_risk,
+                     levels = c("Low risk", "Moderate risk", "High risk")),
+    admission = trimws(patient_recommended_for_admission)
+  ) |>
+  filter(danger_sign)
+
+danger_signs |>
+  count(mo_risk, .drop = FALSE, name = "patients") |>
+  mutate(percent = round(100 * patients / sum(patients), 1)) |>
+  kable(col.names = c("MO risk", "Patients", "%"),
+        caption = "Medical officer risk classification of patients with a danger sign")
+
+danger_signs |>
+  count(admission, name = "patients") |>
+  kable(col.names = c("Recommended for admission", "Patients"),
+        caption = "Admission recommendation for patients with a danger sign")
+
+n_danger       <- nrow(danger_signs)
+n_danger_low   <- sum(danger_signs$mo_risk == "Low risk")
+n_danger_admit <- sum(danger_signs$admission == "Yes")
+```
+
+Of `r n_danger` patients with a danger sign, `r n_danger_low` (`r round(100 * n_danger_low / n_danger, 1)`%) were classified as low risk by the medical officer, and admission was recommended for only `r n_danger_admit`.
